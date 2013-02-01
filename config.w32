@@ -1,0 +1,10 @@
+PREPROCESSOR_EXT_NAME="preprocessor";
+PREPROCESSOR_EXT_DIR="ext/preprocessor";
+PREPROCESSOR_EXT_API="preprocessor.c";
+PREPROCESSOR_EXT_FLAGS="/I" + configure_module_dirname;
+/* --------------------------------------------------------------------- */
+ARG_ENABLE("PREPROCESSOR", "for preprocesor support", "no");
+
+if (PHP_PREPROCESSOR != "no") {
+	EXTENSION(PREPROCESSOR_EXT_NAME, PREPROCESSOR_EXT_API, PHP_PREPROCESSOR_SHARED, PREPROCESSOR_EXT_FLAGS);
+}
