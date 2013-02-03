@@ -12,7 +12,7 @@
   | obtain it through the world-wide-web, please send a note to          |
   | license@php.net so we can mail you a copy immediately.               |
   +----------------------------------------------------------------------+
-  | Author:                                                              |
+  | Author: Bob Weinand <bobwei9@hotmail.com>                            |
   +----------------------------------------------------------------------+
 */
 
@@ -94,41 +94,44 @@ static void php_preprocessor_init_globals(zend_preprocessor_globals *preprocesso
 
 /***/
 
-void preprocessor_patch_code(char **string, size_t *len TSRMLS_DC);
+static inline void preprocessor_patch_code(char **string, size_t *len TSRMLS_DC);
 
 zend_op_array *(*preprocessor_filecompile_main)(zend_file_handle *file_handle, int type TSRMLS_DC);
 zend_op_array *(*preprocessor_stringcompile_main)(zval *source_string, char *filename TSRMLS_DC);
 
 #define bufmax 4096
 
-char *filebuf;
+char **filebuf;
 size_t bufsize;
-size_t bufptr;
+size_t bufptr = 0;
 char *bufstart;
 
 /* read data completely on first call, patch the code, then return part for part the requested max-buffer-size */
 static size_t preprocessor_file_reader(void *handle, char *buf, size_t len TSRMLS_DC) /* {{{ */
 {
-	if (bufstart == NULL) {
+	if (bufptr == 0) {
 		bufstart = buf;
-		bufptr = 0;
 		size_t read, remain = bufmax;
-		filebuf = emalloc(remain);
+		char *bufmptr;
+		filebuf = &bufmptr;
+		*filebuf = emalloc(remain);
+		bufsize = 0;
 
-		while ((read = fread(filebuf, 1, remain, (FILE*)handle)) > 0) {
+		while ((read = fread(*filebuf + bufsize, 1, remain, (FILE*)handle)) > 0) {
 			bufsize += read;
 			remain -= read;
 
 			if (remain == 0) {
-				filebuf = safe_erealloc(filebuf, bufsize, 2, 0);
+				*filebuf = safe_erealloc(*filebuf, bufsize, 2, 0);
 				remain = bufsize;
 			}
 		}
 
-		preprocessor_patch_code(&bufstart, &bufsize TSRMLS_CC);
+		preprocessor_patch_code(filebuf, &bufsize TSRMLS_CC);
 	}
 	if (bufptr > bufsize) {
 		efree(filebuf);
+		bufptr = 0;
 		return 0;
 	}
 	bufptr += len;
@@ -156,7 +159,7 @@ zend_op_array *preprocessor_filecompile(zend_file_handle *file_handle, int type 
 	file_handle->handle.stream.closer = (zend_stream_closer_t)preprocessor_file_closer;
 	file_handle->handle.stream.fsizer = (zend_stream_fsizer_t)preprocessor_file_fsizer;
 	file_handle->type = ZEND_HANDLE_STREAM; // Do not let zend_stream_fixup override our handlers
-	bufstart = NULL;
+	bufptr = 0;
 	return preprocessor_filecompile_main(file_handle, type TSRMLS_CC);
 } /* }}} */
 
@@ -166,8 +169,347 @@ zend_op_array *preprocessor_stringcompile(zval *source_string, char *filename TS
 } /* }}} */
 
 
-void preprocessor_patch_code(char **string, size_t *len TSRMLS_DC) {
-	printf("%s", *string);
+#define ERR(...)	zend_error(E_PARSE, __VA_ARGS__)
+
+
+#define data_default_buflen 80
+
+typedef struct preprocessor_string {
+	char *str;
+	int len;
+} pstring;
+typedef struct preprocessor_dfn {
+	pstring id;
+	pstring str;
+	pstring *args;
+	int arg_count;
+} dfn;
+
+/* "function" for automatically extending (aka reallocing) code if necessary */
+#define WRITE_CODE_S(str, len)	if (codelen+len > bufmax*alloc_count) {										\
+					alloc_count += ((int)(codelen%bufmax + len%bufmax > bufmax)) + (len >> 12);				\
+					code = erealloc(code, bufmax*alloc_count);								\
+				}														\
+				memcpy(code+codelen, str, len);											\
+				codelen += len;
+
+#define WRITE_CODE_C(chr)	if (++codelen > bufmax*alloc_count) {										\
+					alloc_count++;												\
+					code = erealloc(code, bufmax*alloc_count);								\
+				}														\
+				memset(code+codelen-1, chr, 1);
+
+#define WRITE_CODE(str, len)	WRITE_CODE_S(str, len)
+
+#define NEXT_CHAR	(++i < *len?(*string)[i]:0)
+#define NTH_CHAR(x)	(x + i < *len?(*string)[x + i]:0)
+#define CUR_CHAR	(i < *len?(*string)[i]:0)
+#define PREV_CHAR	(--i<0?(*string)[i]:++i) /* ++i should be every time 0 */
+
+#define LINE_END_COND	(NEXT_CHAR == '\n' && NTH_CHAR(1) == '\\' && NEXT_CHAR)
+#define NEXT_IS_WHITESPACE	((NTH_CHAR(1) == '\t' || NTH_CHAR(1) == ' ') && NEXT_CHAR)
+
+/* writes data into buf; user has to free manually */
+#define READ_UNTIL(cmd)	if (buf != NULL) {													\
+				efree(buf);													\
+			}															\
+			buflen = 0;														\
+			buf = emalloc(data_default_buflen);											\
+			while (NTH_CHAR(1) && cmd) {												\
+				if (++buflen == data_default_buflen) {										\
+					buf = erealloc(buf, buflen + data_default_buflen);							\
+				}														\
+				buf[buflen-1] = NEXT_CHAR;											\
+			}
+
+/* Read command -> buf, buflen */
+#define READ_COMMAND READ_UNTIL(NTH_CHAR(1) != '(' && NTH_CHAR(1) != ' ' && NTH_CHAR(1) != '\t' && NTH_CHAR(1) != '\n')
+
+/* aka trash every code until there... */
+#define READ_UNTIL_ELSE_OR_ENDIF	while (CUR_CHAR != 0) {											\
+						while (NEXT_CHAR != 0 && CUR_CHAR == '\\') {							\
+							READ_COMMAND										\
+							if (IS_CMD("endif")) {									\
+								goto cmd_endif;									\
+							} else if (IS_CMD("elif")) {								\
+								goto cmd_elif;									\
+							} else if (IS_CMD("else")) {								\
+								goto cmd_else;									\
+							} else if (IS_CMD("elifndef")) {							\
+								goto cmd_elifndef;								\
+							}											\
+						}												\
+					}
+
+
+#define PARSE_ARGS(buffer, length)	size_t index = 0;											\
+					int parenthesis = 0;											\
+					char stringmode = 0;											\
+					char last_was_backslash = 0;										\
+					pstring *args = NULL;											\
+					int arg_count = -1;											\
+					char *argstart = buffer;										\
+					do {													\
+						switch (*(buffer + index)) {									\
+							case '"':										\
+								if (stringmode == 1 && !last_was_backslash) {					\
+									stringmode = 0;								\
+								} else if (stringmode == 0) {							\
+									stringmode = 1;								\
+								}										\
+							break;											\
+							case '\'':										\
+								if (stringmode == 2 && !last_was_backslash) {					\
+									stringmode = 0;								\
+								} else if (stringmode == 0) {							\
+									stringmode = 2;								\
+								}										\
+							break;											\
+							case '(':										\
+								if (!stringmode) {								\
+									parenthesis++;								\
+								}										\
+							break;											\
+							case ')':										\
+								if (!stringmode) {								\
+									parenthesis--;								\
+								}										\
+							break;											\
+							case ',':										\
+								if (parenthesis < 2) {								\
+									if (++arg_count%10) {							\
+										args = erealloc(args, (arg_count + 10) * sizeof(pstring));	\
+									}									\
+									args[arg_count].str = argstart;						\
+									args[arg_count].len = (buf + index - argstart);				\
+									argstart = buffer + index + 1;						\
+								}										\
+							break;											\
+						}												\
+						if (c == '\\' && !last_was_backslash) {								\
+							last_was_backslash = 1;									\
+						} else {											\
+							last_was_backslash = 0;									\
+						}												\
+					} while(++c < length);
+
+
+#define REPLACE_DEFINE(data, off, datalen)	if (len > 0) {											\
+							for (int index = 0; index < dfn_count; index++) {					\
+							dfn *defn = &dfns[index];								\
+								if (defn->id.len == len && strncasecmp(bufloc, defn->id.str, len) == 0) {	\
+									if (defn->arg_count == 0) {						\
+									int templen = (int)(-(int)bufloc + data - len + datalen);		\
+									char *temp = emalloc(templen);						\
+									memcpy(temp, bufloc + len, templen);					\
+									datalen -= len + defn->str.len;						\
+									data = erealloc(data, datalen);						\
+									memcpy(bufloc, defn->str.str, defn->str.len);				\
+									memcpy(bufloc + defn->str.len, temp, templen);				\
+								}										\
+								break;										\
+							}											\
+						}												\
+						len = 0;											\
+					}
+
+
+#define REPLACE_DEFINES(data, off, datalen)	{												\
+						char maybe_defn = 0;										\
+						char last_was_backslash = 0;									\
+						char stringmode = 0;										\
+						char *bufloc = NULL;										\
+						int len = 0;											\
+						for (int i = off; i < datalen + off; i++) {							\
+							switch (*(data + i)) {									\
+								case ' ':									\
+								case ',':									\
+								case '\t':									\
+								case ')':									\
+								case '(':									\
+								case '\n':									\
+									maybe_defn = 1;								\
+									REPLACE_DEFINE(data, off, datalen)					\
+								break;										\
+								case '"':									\
+									if (stringmode == 1 && !last_was_backslash) {				\
+										stringmode = 0;							\
+									} else if (stringmode == 0) {						\
+										stringmode = 1;							\
+									}									\
+									REPLACE_DEFINE(data, off, datalen)					\
+								break;										\
+								case '\'':									\
+									if (stringmode == 2 && !last_was_backslash) {				\
+										stringmode = 0;							\
+									} else if (stringmode == 0) {						\
+										stringmode = 2;							\
+									}									\
+									REPLACE_DEFINE(data, off, datalen)					\
+								break;										\
+								case '\\':									\
+									len = 0;								\
+									maybe_defn = 0;								\
+								break;										\
+								default:									\
+									if (maybe_defn && !stringmode && len == 0) {				\
+										bufloc = data + i;						\
+										len = 1;							\
+									} else if (len > 0) {							\
+										len++;								\
+									}									\
+								break;										\
+							}											\
+							if (*(data + i) == '/') {								\
+								last_was_backslash = 1;								\
+							} else {										\
+								last_was_backslash = 0;								\
+							}											\
+						}												\
+					}
+
+#define IS_CMD(cmd) strncasecmp(cmd, buf, buflen) == 0
+#define IF_READ	READ_UNTIL(NTH_CHAR(1) != '\\' && NTH_CHAR(2) == '\n')
+#define IF_CMD	
+#define IFNDEF_CMD	
+
+#define INCREMENT_IF_DEPTH	if (++if_depth%data_default_buflen == 0 && if_depth != 0) {							\
+					ifs = erealloc(ifs, if_depth + data_default_buflen);							\
+				}
+
+
+static inline void preprocessor_patch_code(char **string, size_t *len TSRMLS_DC) {
+
+	size_t codelen = 0;
+	size_t defoffset = 0;
+	char *code = emalloc(bufmax);
+	unsigned int alloc_count = 0;
+	char *ifs = emalloc(data_default_buflen);
+	int if_depth = -1;
+	size_t buflen;
+	char *buf = NULL;
+	dfn *dfns = emalloc(data_default_buflen * sizeof(dfn));
+	int dfn_count = 0;
+
+	printf("%s\n", *string);
+
+	int i = -1;
+	do {
+		if (LINE_END_COND) {
+			/* Instruction set: \define, \if, \else, \elif, \endif, \ifndef, \elifndef */
+
+			READ_COMMAND
+parse_cmd:
+			if (IS_CMD("if")) {
+cmd_if:
+				INCREMENT_IF_DEPTH
+				IF_CMD
+			} else if (IS_CMD("ifndef")) {
+cmd_ifndef:
+				INCREMENT_IF_DEPTH
+				IFNDEF_CMD
+				
+			} else if (IS_CMD("elif")) {
+cmd_elif:
+				if (!ifs[if_depth]) {
+					IF_CMD
+				} else {
+					READ_UNTIL_ELSE_OR_ENDIF
+				}
+			} else if (IS_CMD("elifndef")) {
+cmd_elifndef:
+				if (!ifs[if_depth]) {
+					IFNDEF_CMD
+				} else {
+					READ_UNTIL_ELSE_OR_ENDIF
+				}
+			} else if (IS_CMD("else")) {
+cmd_else:
+				if (!ifs[if_depth]) {
+					ifs[if_depth] = 1;
+				} else {
+					READ_UNTIL_ELSE_OR_ENDIF;
+				}
+			} else if (IS_CMD("endif")) {
+cmd_endif:
+				ifs[if_depth--] = 0;
+			} else if (IS_CMD("define")) {
+cmd_define: ;
+				size_t c = 0;
+				char actual;
+				dfn def;
+				{
+					int parenthesis = 0;
+					while (NEXT_IS_WHITESPACE);
+					READ_UNTIL(((NTH_CHAR(1) == '('?(NTH_CHAR(1) == ')'?--parenthesis:++parenthesis):parenthesis) | !NEXT_IS_WHITESPACE) && NTH_CHAR(1))
+					do {
+						char actual = *(buf + c);
+						if (actual == '(') {
+							c--;
+							break;
+						}
+					} while (++c < buflen);
+					if (parenthesis < 0) {
+						ERR("Unexpected ')' within 'define' instruction");
+					} else if (parenthesis > 0) {
+						ERR("Expecting ')' within 'define' instruction");
+					}
+				}
+				def.id.str = emalloc(c);
+				def.id.len = c;
+				memcpy(def.id.str, buf, c);
+				if (actual == '(') {
+					buf += c;
+					PARSE_ARGS(buf, buflen - c);
+					def.args = args;
+					def.arg_count = arg_count;
+					buf = NULL;
+				} else {
+					def.arg_count = 0;
+				}
+
+				int diff = codelen - defoffset;
+				int init_diff = diff;
+				
+				REPLACE_DEFINES(code, defoffset, diff)
+				codelen += diff - init_diff;
+				defoffset = codelen;
+				READ_UNTIL(LINE_END_COND)
+				REPLACE_DEFINES(buf, 0, buflen)
+				def.str.str = buf;
+				def.str.len = buflen;
+				buf = NULL; /* prevent string being freed */
+				if (++dfn_count%data_default_buflen == 0) {
+					dfns = erealloc(dfns, (dfn_count + data_default_buflen) * sizeof(dfn));
+				}
+				dfns[dfn_count] = def;
+			} else {
+				memset(buf + buflen, 0, 1); // set final null-byte
+				ERR("Invalid preprocessor command: '%s'", buf);
+			}
+		} else {
+			WRITE_CODE_C(CUR_CHAR);
+		}
+	} while (i + 1 < *len);
+	if (if_depth > 0) {
+		ERR("Preprocessor command 'endif' missing");
+	}
+	do {
+		if (dfns[dfn_count].args != NULL) {
+			efree(dfns[dfn_count].args);
+		}
+		if (dfns[dfn_count].str.str != NULL) {
+			efree(dfns[dfn_count].str.str);
+		}
+	} while (dfn_count--);
+	efree(dfns);
+	efree(ifs);
+	if (buf != NULL) {
+		efree(buf);
+	}
+
+	*string = erealloc(*string, (codelen - (codelen % bufmax)) + bufmax);
+	memcpy(string, code, codelen);
 } /* }}} */
 
 /*|*/
