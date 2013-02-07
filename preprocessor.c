@@ -128,7 +128,7 @@ static size_t preprocessor_file_reader(void *handle, char *buf, size_t len TSRML
 
 		preprocessor_patch_code(&filebuf, &bufsize TSRMLS_CC);
 	}
-	if (bufptr > bufsize) {
+	if (bufptr >= bufsize) {
 		efree(filebuf);
 		bufptr = 0;
 		return 0;
@@ -205,13 +205,13 @@ typedef struct preprocessor_dfn {
 
 #define WRITE_CODE(str, str_len)	WRITE_CODE_S(str, str_len)
 
-#define NEXT_CHAR	(++i < *len?(*string)[i]:0)
-#define NTH_CHAR(x)	(x + i < *len?(*string)[x + i]:0)
-#define CUR_CHAR	(i < *len?(*string)[i]:0)
+#define NEXT_CHAR	(++i < *len?(*string)[i]:-1)
+#define NTH_CHAR(x)	(x + i < *len?(*string)[x + i]:-1)
+#define CUR_CHAR	(i < *len?(*string)[i]:-1)
 #define PREV_CHAR	(--i<0?++i:(*string)[i]) /* ++i should be every time 0 */
 
-#define LINE_END_COND	(NEXT_CHAR == '\n' && NTH_CHAR(1) == '\\' && NEXT_CHAR)
-#define NEXT_IS_WHITESPACE	((NTH_CHAR(1) == '\t' || NTH_CHAR(1) == ' ') && NEXT_CHAR)
+#define LINE_END_COND	(NEXT_CHAR == '\n' && NTH_CHAR(1) == '\\' && -1 != NEXT_CHAR)
+#define NEXT_IS_WHITESPACE	((NTH_CHAR(1) == '\t' || NTH_CHAR(1) == ' ') && -1 != NEXT_CHAR)
 
 /* writes data into buf; user has to free manually */
 #define READ_UNTIL(cmd)	if (buf != NULL) {														\
@@ -219,7 +219,7 @@ typedef struct preprocessor_dfn {
 			}																\
 			buflen = 0;															\
 			buf = emalloc(data_default_buflen);												\
-			while (NTH_CHAR(1) && cmd) {													\
+			while (-1 != NTH_CHAR(1) && cmd) {												\
 				if (++buflen == data_default_buflen) {											\
 					buf = erealloc(buf, buflen + data_default_buflen);								\
 				}															\
@@ -231,7 +231,7 @@ typedef struct preprocessor_dfn {
 
 /* aka trash every code until there... */
 #define READ_UNTIL_ELSE_OR_ENDIF	while (CUR_CHAR != 0) {												\
-						while (NEXT_CHAR != 0 && CUR_CHAR == '\\') {								\
+						while (-1 != NEXT_CHAR && CUR_CHAR == '\\') {								\
 							READ_COMMAND											\
 							if (IS_CMD("endif")) {										\
 								goto cmd_endif;										\
@@ -299,81 +299,90 @@ typedef struct preprocessor_dfn {
 
 
 #define REPLACE_DEFINE(data, off, datalen)	if (str_len > 0) {											\
-							for (int index = 0; index < dfn_count; index++) {						\
-							dfn *defn = &dfns[index];									\
+							printf("replace_routine entered\n"); \
+							for (int index = 0; index <= dfn_count; index++) {						\
+								dfn *defn = &dfns[index];								\
 								if (defn->id.len == str_len && strncasecmp(bufloc, defn->id.str, str_len) == 0) {	\
 									if (defn->arg_count == 0) {							\
-									int templen = (int)(-(int)bufloc + data - str_len + datalen);			\
-									char *temp = emalloc(templen);							\
-									memcpy(temp, bufloc + str_len, templen);					\
-									datalen -= str_len + defn->str.len;						\
-									data = erealloc(data, datalen);							\
-									memcpy(bufloc, defn->str.str, defn->str.len);					\
-									memcpy(bufloc + defn->str.len, temp, templen);					\
+										int templen = (int)(datalen - i - off);					\
+										char *temp = emalloc(templen);						\
+										memcpy(temp, bufloc + str_len, templen);				\
+										datalen += defn->str.len + str_len;					\
+										data = erealloc(data, datalen);						\
+										memcpy(data + i - str_len, defn->str.str, defn->str.len);		\
+										i += defn->str.len - str_len;						\
+										memcpy(data + i, temp, templen);					\
+										efree(temp);								\
+									}										\
+									break;										\
 								}											\
-								break;											\
 							}												\
-						}													\
-						str_len = 0;												\
-					}
+							str_len = 0;											\
+						}
 
 
-#define REPLACE_DEFINES(data, off, datalen)	{													\
-						char maybe_defn = 0;											\
-						char last_was_backslash = 0;										\
-						char stringmode = 0;											\
-						char *bufloc = NULL;											\
-						int str_len = 0;											\
-						for (int i = off; i < datalen + off; i++) {								\
-							switch (*(data + i)) {										\
-								case ' ':										\
-								case ',':										\
-								case '\t':										\
-								case ')':										\
-								case '(':										\
-								case '\n':										\
-									maybe_defn = 1;									\
-									REPLACE_DEFINE(data, off, datalen)						\
-								break;											\
-								case '"':										\
-									if (stringmode == 1 && !last_was_backslash) {					\
-										stringmode = 0;								\
-									} else if (stringmode == 0) {							\
-										stringmode = 1;								\
-									}										\
-									REPLACE_DEFINE(data, off, datalen)						\
-								break;											\
-								case '\'':										\
-									if (stringmode == 2 && !last_was_backslash) {					\
-										stringmode = 0;								\
-									} else if (stringmode == 0) {							\
-										stringmode = 2;								\
-									}										\
-									REPLACE_DEFINE(data, off, datalen)						\
-								break;											\
-								case '\\':										\
-									if (stringmode) {								\
-										str_len++;								\
-									} else {									\
-										maybe_defn = 0;								\
-									}										\
-								break;											\
-								default:										\
-									if (maybe_defn && !stringmode && len == 0) {					\
-										bufloc = data + i;							\
-										str_len = 1;								\
-									} else if (len > 0) {								\
-										str_len++;								\
-									}										\
-								break;											\
+#define REPLACE_DEFINES(data, off, datalen)	if (dfn_count != -1) {											\
+							char maybe_defn = 0;										\
+							char last_was_backslash = 0;									\
+							char stringmode = 0;										\
+							char *bufloc = data + off;									\
+							int str_len = 0;										\
+							for (int i = off; i < datalen + off; i++) {							\
+							printf("%i @%i (%c) (str(%i) : %.*s)\n", maybe_defn, i, *(data + i), str_len, str_len, bufloc); \
+								switch (*(data + i)) {									\
+									case ' ':									\
+									case ',':									\
+									case ';':									\
+									case '.':									\
+									case '\t':									\
+									case ')':									\
+									case '(':									\
+									case '\n':									\
+										maybe_defn = 1;								\
+										if (!stringmode) {							\
+											REPLACE_DEFINE(data, off, datalen)				\
+										}									\
+										str_len = 0;								\
+									break;										\
+									case '"':									\
+										if (stringmode == 1 && !last_was_backslash) {				\
+											stringmode = 0;							\
+											REPLACE_DEFINE(data, off, datalen)				\
+										} else if (stringmode == 0) {						\
+											stringmode = 1;							\
+										}									\
+									break;										\
+									case '\'':									\
+										if (stringmode == 2 && !last_was_backslash) {				\
+											stringmode = 0;							\
+											REPLACE_DEFINE(data, off, datalen)				\
+										} else if (stringmode == 0) {						\
+											stringmode = 2;							\
+										}									\
+									break;										\
+									case '\\':									\
+										if (stringmode) {							\
+											str_len++;							\
+										} else {								\
+											maybe_defn = 0;							\
+										}									\
+									break;										\
+									default:									\
+										if (maybe_defn && !stringmode && str_len == 0) {			\
+											bufloc = data + i;						\
+											str_len = 1;							\
+										} else if (str_len > 0) {						\
+											str_len++;							\
+										}									\
+									break;										\
+								}											\
+								if (!stringmode && *(data + i) == '/') {						\
+									last_was_backslash = 1;								\
+								} else {										\
+									last_was_backslash = 0;								\
+								}											\
 							}												\
-							if (*(data + i) == '/') {									\
-								last_was_backslash = 1;									\
-							} else {											\
-								last_was_backslash = 0;									\
-							}												\
-						}													\
-					}
+						}
 
 #define IS_CMD(cmd) strncasecmp(cmd, buf, buflen) == 0
 #define IF_READ	READ_UNTIL(CUR_CHAR != '\\' && NTH_CHAR(1) != '\n')
@@ -397,8 +406,8 @@ static inline void preprocessor_patch_code(char **string, size_t *len TSRMLS_DC)
 	int if_depth = -1;
 	size_t buflen;
 	char *buf = NULL;
-	dfn *dfns = emalloc(data_default_buflen * sizeof(dfn));
-	int dfn_count = 0;
+	dfn *dfns = NULL;
+	int dfn_count = -1;
 
 	printf("%s\n", *string);
 
@@ -484,7 +493,7 @@ cmd_define: ;
 				REPLACE_DEFINES(code, defoffset, diff)
 				codelen += diff - init_diff;
 				defoffset = codelen;
-				READ_UNTIL(LINE_END_COND)
+				READ_UNTIL(CUR_CHAR == '\\' || NTH_CHAR(1) != '\n')
 				REPLACE_DEFINES(buf, 0, buflen)
 				def.str.str = buf;
 				def.str.len = buflen;
@@ -504,18 +513,27 @@ cmd_define: ;
 		}
 		printf("Ci: %i\n", i);
 	} while (i + 1 < *len);
+
+	int diff = codelen - defoffset;
+	REPLACE_DEFINES(code, defoffset, diff);
+
 	if (if_depth > 0) {
 		ERR("Preprocessor command 'endif' missing");
 	}
-	while (dfn_count--) {
-		if (dfns[dfn_count].args != NULL) {
-			efree(dfns[dfn_count].args);
+	if (dfns != NULL) {
+		while (dfn_count--) {
+			if (dfns[dfn_count].args != NULL) {
+				efree(dfns[dfn_count].args);
+			}
+			if (dfns[dfn_count].str.str != NULL) {
+				efree(dfns[dfn_count].str.str);
+			}
+			if (dfns[dfn_count].id.str != NULL) {
+				efree(dfns[dfn_count].id.str);
+			}
 		}
-		if (dfns[dfn_count].str.str != NULL) {
-			efree(dfns[dfn_count].str.str);
-		}
+		efree(dfns);
 	}
-	efree(dfns);
 	if (ifs != NULL) {
 		efree(ifs);
 	}
@@ -525,6 +543,7 @@ cmd_define: ;
 
 	*string = erealloc(*string, (codelen - (codelen % bufmax)) + bufmax);
 	memcpy(*string, code, codelen);
+	printf("%.*s", (int)codelen, code);
 	efree(code);
 	*len = codelen;
 } /* }}} */
@@ -594,9 +613,9 @@ PHP_MINFO_FUNCTION(preprocessor)
 /* }}} */
 
 
-/* 
+/*
  * Local variables:
- * tab-width: 4
+ * tab-width: 8
  * c-basic-offset: 4
  * End:
  * vim600: noet sw=4 ts=4 fdm=marker
