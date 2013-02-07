@@ -1,8 +1,6 @@
 <?php
 
-if (!extension_loaded("preprocessor")) {
-	dl("preprocessor.so");
-	include __FILE__;
-}
+\if bla
+\endif
 
 eval('print "zzz...\n\n";');
