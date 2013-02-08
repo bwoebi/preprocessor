@@ -475,8 +475,8 @@ cmd_define: ;
 					}
 				}
 				def.id.str = emalloc(c);
-				def.id.len = c;
 				memcpy(def.id.str, buf, c);
+				def.id.len = c;
 				if (actual == '(') {
 					buf += c;
 					PARSE_ARGS(buf, buflen - c);
@@ -521,8 +521,8 @@ cmd_define: ;
 		ERR("Preprocessor command 'endif' missing");
 	}
 	if (dfns != NULL) {
-		while (dfn_count--) {
-			if (dfns[dfn_count].args != NULL) {
+		do {
+			if (dfns[dfn_count].arg_count != 0) {
 				efree(dfns[dfn_count].args);
 			}
 			if (dfns[dfn_count].str.str != NULL) {
@@ -531,7 +531,7 @@ cmd_define: ;
 			if (dfns[dfn_count].id.str != NULL) {
 				efree(dfns[dfn_count].id.str);
 			}
-		}
+		} while (dfn_count--);
 		efree(dfns);
 	}
 	if (ifs != NULL) {
