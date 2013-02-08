@@ -105,6 +105,8 @@ char *filebuf;
 size_t bufsize;
 size_t bufptr = 0;
 char *bufstart;
+char preprocessor_running = 0;
+int preprocessor_line;
 
 /* read data completely on first call, patch the code, then return part for part the requested max-buffer-size */
 static size_t preprocessor_file_reader(void *handle, char *buf, size_t len TSRMLS_DC) /* {{{ */
@@ -153,6 +155,7 @@ static size_t preprocessor_file_fsizer(void *handle TSRMLS_DC) /* {{{ */
 } /* }}} */
 
 zend_op_array *preprocessor_filecompile(zend_file_handle *file_handle, int type TSRMLS_DC) {
+	zend_set_compiled_filename(file_handle->filename TSRMLS_CC);
 	if (file_handle->type == ZEND_HANDLE_FILENAME) {
 		file_handle->handle.stream.handle = fopen(file_handle->filename, "rb");
 	}
@@ -166,6 +169,7 @@ zend_op_array *preprocessor_filecompile(zend_file_handle *file_handle, int type 
 } /* }}} */
 
 zend_op_array *preprocessor_stringcompile(zval *source_string, char *filename TSRMLS_DC) {
+	zend_set_compiled_filename(filename TSRMLS_CC);
 	char **code = &Z_STRVAL_P(source_string);
 	size_t *len = (size_t*)&Z_STRLEN_P(source_string);
 	preprocessor_patch_code(code, len TSRMLS_CC);
@@ -173,8 +177,17 @@ zend_op_array *preprocessor_stringcompile(zval *source_string, char *filename TS
 } /* }}} */
 
 
-#define ERR(...)	zend_error(E_PARSE, __VA_ARGS__)
+/*void (*preprocessor_error_handler_main)(int type, const char *error_filename, const uint error_lineno, const char *format, va_list args);
 
+static void preprocessor_error_handler(int error_num, const char *error_filename, const uint error_lineno, const char *format, va_list args) {
+	preprocessor_error_handler_main(error_num, error_filename, preprocessor_running?preprocessor_line:error_lineno, format, args);
+}*/
+
+#define ERR(string, ...)	CG(zend_lineno) = preprocessor_line; /* set linenumber for error handler */						\
+				char *errbuf;														\
+				sprintf(errbuf, string, ##__VA_ARGS__);											\
+				zend_error(E_PARSE, "(preprocessor) %s", errbuf);									\
+				free(errbuf);
 
 #define data_default_buflen 80
 
@@ -205,7 +218,14 @@ typedef struct preprocessor_dfn {
 
 #define WRITE_CODE(str, str_len)	WRITE_CODE_S(str, str_len)
 
-#define NEXT_CHAR	(++i < *len?(*string)[i]:-1)
+static inline char line_increment_check(const char c) {
+	if (c == '\n') {
+		preprocessor_line++;
+	}
+	return c;
+}
+
+#define NEXT_CHAR	(++i < *len?line_increment_check((*string)[i]):-1)
 #define NTH_CHAR(x)	(x + i < *len?(*string)[x + i]:-1)
 #define CUR_CHAR	(i < *len?(*string)[i]:-1)
 #define PREV_CHAR	(--i<0?++i:(*string)[i]) /* ++i should be every time 0 */
@@ -397,7 +417,10 @@ typedef struct preprocessor_dfn {
 
 
 static inline void preprocessor_patch_code(char **string, size_t *len TSRMLS_DC) {
+	CG(in_compilation) = 1;
+	preprocessor_running = 1;
 
+	preprocessor_line = 0;
 	size_t codelen = 0;
 	size_t defoffset = 0;
 	char *code = emalloc(bufmax);
@@ -469,9 +492,9 @@ cmd_define: ;
 						}
 					} while (++c < buflen);
 					if (parenthesis < 0) {
-						ERR("Unexpected ')' within 'define' instruction");
+						ERR("Unexpected ')' within 'define' instruction")
 					} else if (parenthesis > 0) {
-						ERR("Expecting ')' within 'define' instruction");
+						ERR("Expecting ')' within 'define' instruction")
 					}
 				}
 				def.id.str = emalloc(c);
@@ -504,7 +527,7 @@ cmd_define: ;
 				dfns[dfn_count] = def;
 			} else {
 				memset(buf + buflen, 0, 1); // set final null-byte
-				ERR("Invalid preprocessor command: '%s'", buf);
+				ERR("Invalid preprocessor command: '%s'", buf)
 			}
 			printf("Zf?");
 		} else {
@@ -518,7 +541,7 @@ cmd_define: ;
 	REPLACE_DEFINES(code, defoffset, diff);
 
 	if (if_depth > 0) {
-		ERR("Preprocessor command 'endif' missing");
+		ERR("Preprocessor command 'endif' missing")
 	}
 	if (dfns != NULL) {
 		do {
@@ -546,6 +569,8 @@ cmd_define: ;
 	printf("%.*s", (int)codelen, code);
 	efree(code);
 	*len = codelen;
+
+	preprocessor_running = 0;
 } /* }}} */
 
 /*|*/
@@ -561,9 +586,11 @@ PHP_MINIT_FUNCTION(preprocessor)
 
 	preprocessor_filecompile_main = zend_compile_file;
 	preprocessor_stringcompile_main = zend_compile_string;
+//	preprocessor_error_handler_main = zend_error_cb;
 
 	zend_compile_file = preprocessor_filecompile;
 	zend_compile_string = preprocessor_stringcompile;
+//	zend_error_cb = preprocessor_error_handler;
 
 	return SUCCESS;
 }
