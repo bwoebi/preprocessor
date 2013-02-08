@@ -185,9 +185,10 @@ static void preprocessor_error_handler(int error_num, const char *error_filename
 
 #define ERR(string, ...)	CG(zend_lineno) = preprocessor_line; /* set linenumber for error handler */						\
 				char *errbuf;														\
-				sprintf(errbuf, string, ##__VA_ARGS__);											\
+				spprintf(&errbuf, 0, string, ##__VA_ARGS__);										\
 				zend_error(E_PARSE, "(preprocessor) %s", errbuf);									\
-				free(errbuf);
+				efree(errbuf);														\
+				zend_bailout();
 
 #define data_default_buflen 80
 
@@ -324,14 +325,14 @@ static inline char line_increment_check(const char c) {
 								dfn *defn = &dfns[index];								\
 								if (defn->id.len == str_len && strncasecmp(bufloc, defn->id.str, str_len) == 0) {	\
 									if (defn->arg_count == 0) {							\
-										int templen = (int)(datalen - i - off);					\
+										int templen = (int)(datalen - ir - off);				\
 										char *temp = emalloc(templen);						\
 										memcpy(temp, bufloc + str_len, templen);				\
 										datalen += defn->str.len + str_len;					\
 										data = erealloc(data, datalen);						\
-										memcpy(data + i - str_len, defn->str.str, defn->str.len);		\
+										memcpy(data + ir - str_len, defn->str.str, defn->str.len);		\
 										i += defn->str.len - str_len;						\
-										memcpy(data + i, temp, templen);					\
+										memcpy(data + ir, temp, templen);					\
 										efree(temp);								\
 									}										\
 									break;										\
@@ -347,9 +348,9 @@ static inline char line_increment_check(const char c) {
 							char stringmode = 0;										\
 							char *bufloc = data + off;									\
 							int str_len = 0;										\
-							for (int i = off; i < datalen + off; i++) {							\
-							printf("%i @%i (%c) (str(%i) : %.*s)\n", maybe_defn, i, *(data + i), str_len, str_len, bufloc); \
-								switch (*(data + i)) {									\
+							for (int ir = off; ir < datalen + off; ir++) {							\
+							printf("%i @%i (%c) (str(%i) : %.*s)\n", maybe_defn, ir, *(data+ir), str_len, str_len, bufloc);	\
+								switch (*(data + ir)) {									\
 									case ' ':									\
 									case ',':									\
 									case ';':									\
@@ -396,7 +397,7 @@ static inline char line_increment_check(const char c) {
 										}									\
 									break;										\
 								}											\
-								if (!stringmode && *(data + i) == '/') {						\
+								if (!stringmode && *(data + ir) == '/') {						\
 									last_was_backslash = 1;								\
 								} else {										\
 									last_was_backslash = 0;								\
@@ -540,7 +541,7 @@ cmd_define: ;
 	int diff = codelen - defoffset;
 	REPLACE_DEFINES(code, defoffset, diff);
 
-	if (if_depth > 0) {
+	if (if_depth != -1) {
 		ERR("Preprocessor command 'endif' missing")
 	}
 	if (dfns != NULL) {
