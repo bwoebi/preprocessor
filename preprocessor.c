@@ -99,45 +99,35 @@ static inline void preprocessor_patch_code(char **string, size_t *len TSRMLS_DC)
 zend_op_array *(*preprocessor_filecompile_main)(zend_file_handle *file_handle, int type TSRMLS_DC);
 zend_op_array *(*preprocessor_stringcompile_main)(zval *source_string, char *filename TSRMLS_DC);
 
-#define bufmax 4096
-
-char *filebuf;
-size_t bufsize;
-size_t bufptr = 0;
-char *bufstart;
-char preprocessor_running = 0;
-int preprocessor_line;
-
 /* read data completely on first call, patch the code, then return part for part the requested max-buffer-size */
 static size_t preprocessor_file_reader(void *handle, char *buf, size_t len TSRMLS_DC) /* {{{ */
 {
 	printf("iteration...\n");
-	if (bufptr == 0) {
-		bufstart = buf;
+	if (PHPPP_G(bufptr) == 0) {
 		size_t read, remain = bufmax;
-		filebuf = emalloc(remain);
-		bufsize = 0;
+		PHPPP_G(filebuf) = emalloc(remain);
+		PHPPP_G(bufsize) = 0;
 
-		while ((read = fread(filebuf + bufsize, 1, remain, (FILE*)handle)) > 0) {
-			bufsize += read;
+		while ((read = fread(PHPPP_G(filebuf) + PHPPP_G(bufsize), 1, remain, (FILE*)handle)) > 0) {
+			PHPPP_G(bufsize) += read;
 			remain -= read;
 
 			if (remain == 0) {
-				filebuf = safe_erealloc(filebuf, bufsize, 2, 0);
-				remain = bufsize;
+				PHPPP_G(filebuf) = safe_erealloc(PHPPP_G(filebuf), PHPPP_G(bufsize), 2, 0);
+				remain = PHPPP_G(bufsize);
 			}
 		}
 
-		preprocessor_patch_code(&filebuf, &bufsize TSRMLS_CC);
+		preprocessor_patch_code(&PHPPP_G(filebuf), &PHPPP_G(bufsize) TSRMLS_CC);
 	}
-	if (bufptr >= bufsize) {
-		efree(filebuf);
-		bufptr = 0;
+	if (PHPPP_G(bufptr) >= PHPPP_G(bufsize)) {
+		efree(PHPPP_G(filebuf));
+		PHPPP_G(bufptr) = 0;
 		return 0;
 	}
-	bufptr += len;
-	size_t write = bufptr > bufsize?bufsize%bufmax:len;
-	memcpy(buf, filebuf+bufptr-len, write);
+	PHPPP_G(bufptr) += len;
+	size_t write = PHPPP_G(bufptr) > PHPPP_G(bufsize)?PHPPP_G(bufsize)%bufmax:len;
+	memcpy(buf, PHPPP_G(filebuf)+PHPPP_G(bufptr)-len, write);
 	return write;
 } /* }}} */
 
@@ -164,7 +154,7 @@ zend_op_array *preprocessor_filecompile(zend_file_handle *file_handle, int type 
 	file_handle->handle.stream.closer = (zend_stream_closer_t)preprocessor_file_closer;
 	file_handle->handle.stream.fsizer = (zend_stream_fsizer_t)preprocessor_file_fsizer;
 	file_handle->type = ZEND_HANDLE_STREAM; // Do not let zend_stream_fixup override our handlers
-	bufptr = 0;
+	PHPPP_G(bufptr) = 0;
 	return preprocessor_filecompile_main(file_handle, type TSRMLS_CC);
 } /* }}} */
 
@@ -180,28 +170,15 @@ zend_op_array *preprocessor_stringcompile(zval *source_string, char *filename TS
 /*void (*preprocessor_error_handler_main)(int type, const char *error_filename, const uint error_lineno, const char *format, va_list args);
 
 static void preprocessor_error_handler(int error_num, const char *error_filename, const uint error_lineno, const char *format, va_list args) {
-	preprocessor_error_handler_main(error_num, error_filename, preprocessor_running?preprocessor_line:error_lineno, format, args);
+	preprocessor_error_handler_main(error_num, error_filename, PHPPP_G(running)?PHPPP_G(line):error_lineno, format, args);
 }*/
 
-#define ERR(string, ...)	CG(zend_lineno) = preprocessor_line; /* set linenumber for error handler */						\
+#define ERR(string, ...)	CG(zend_lineno) = PHPPP_G(line); /* set linenumber for error handler */							\
 				char *errbuf;														\
 				spprintf(&errbuf, 0, string, ##__VA_ARGS__);										\
 				zend_error(E_PARSE, "(preprocessor) %s", errbuf);									\
 				efree(errbuf);														\
 				zend_bailout();
-
-#define data_default_buflen 80
-
-typedef struct preprocessor_string {
-	char *str;
-	int len;
-} pstring;
-typedef struct preprocessor_dfn {
-	pstring id;
-	pstring str;
-	pstring *args;
-	int arg_count;
-} dfn;
 
 /* "function" for automatically extending (aka reallocing) code if necessary */
 #define WRITE_CODE_S(str, str_len)	if (codelen+str_len > bufmax*alloc_count) {									\
@@ -219,14 +196,14 @@ typedef struct preprocessor_dfn {
 
 #define WRITE_CODE(str, str_len)	WRITE_CODE_S(str, str_len)
 
-static inline char line_increment_check(const char c) {
+static inline char line_increment_check(const char c TSRMLS_DC) {
 	if (c == '\n') {
-		preprocessor_line++;
+		PHPPP_G(line)++;
 	}
 	return c;
 }
 
-#define NEXT_CHAR	(++i < *len?line_increment_check((*string)[i]):-1)
+#define NEXT_CHAR	(++i < *len?line_increment_check((*string)[i] TSRMLS_CC):-1)
 #define NTH_CHAR(x)	(x + i < *len?(*string)[x + i]:-1)
 #define CUR_CHAR	(i < *len?(*string)[i]:-1)
 #define PREV_CHAR	(--i<0?++i:(*string)[i]) /* ++i should be every time 0 */
@@ -419,9 +396,9 @@ static inline char line_increment_check(const char c) {
 
 static inline void preprocessor_patch_code(char **string, size_t *len TSRMLS_DC) {
 	CG(in_compilation) = 1;
-	preprocessor_running = 1;
+	PHPPP_G(running) = 1;
 
-	preprocessor_line = 0;
+	PHPPP_G(line) = 0;
 	size_t codelen = 0;
 	size_t defoffset = 0;
 	char *code = emalloc(bufmax);
@@ -571,7 +548,7 @@ cmd_define: ;
 	efree(code);
 	*len = codelen;
 
-	preprocessor_running = 0;
+	PHPPP_G(running) = 0;
 } /* }}} */
 
 /*|*/
@@ -584,6 +561,8 @@ PHP_MINIT_FUNCTION(preprocessor)
 	/* If you have INI entries, uncomment these lines
 	REGISTER_INI_ENTRIES();
 	*/
+
+	PHPPP_G(running) = 0;
 
 	preprocessor_filecompile_main = zend_compile_file;
 	preprocessor_stringcompile_main = zend_compile_string;
