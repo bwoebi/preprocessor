@@ -204,7 +204,7 @@ static inline char line_increment_check(const char c TSRMLS_DC) {
 }
 
 #define NEXT_CHAR	(++i < *len?line_increment_check((*string)[i] TSRMLS_CC):-1)
-#define NTH_CHAR(x)	(x + i < *len?(*string)[x + i]:-1)
+#define NTH_CHAR(x)	(x + i > -1 && x + i < *len?(*string)[x + i]:-1)
 #define CUR_CHAR	(i < *len?(*string)[i]:-1)
 #define PREV_CHAR	(--i<0?++i:(*string)[i]) /* ++i should be every time 0 */
 
@@ -413,8 +413,12 @@ static inline void preprocessor_patch_code(char **string, size_t *len TSRMLS_DC)
 	printf("%s\n", *string);
 
 	int i = -1;
+	char main_commentmode = 0;
+	char main_stringmode = 0;
+	char php_mode = 0;
+	char php_chars = 0;
 	do {
-		if (LINE_END_COND) {
+		if (php_mode && main_stringmode == 0 && main_commentmode == 0 && LINE_END_COND) {
 			printf("Entered super? %i", i);
 			/* Instruction set: \define, \if, \else, \elif, \endif, \ifndef, \elifndef */
 
@@ -495,6 +499,46 @@ cmd_define: ;
 				codelen += diff - init_diff;
 				defoffset = codelen;
 				READ_UNTIL(CUR_CHAR == '\\' || NTH_CHAR(1) != '\n')
+				char* tempbuf = buf;
+				int tempbuflen = buflen;
+				buflen = 0;
+				for (int index = 0; index < tempbuflen; index++) {
+					char stringmode = 0;
+					char last_was_backslash = 0;
+					switch (tempbuf[index]) {
+						case '"':
+							if (stringmode == 0) {
+								stringmode = 1;
+							} else if (last_was_backslash && stringmode == 1) {
+								stringmode = 0;
+							}
+							buf[buflen++] = '"';
+						case '\'':
+							if (stringmode == 0) {
+								stringmode = 2;
+							} else if (last_was_backslash && stringmode == 2) {
+								stringmode = 0;
+							}
+							buf[buflen++] = '\'';
+						break;
+						case '\n':
+							if (stringmode == 0) {
+								buf[buflen++] = ' ';
+							} else {
+								buf[buflen-1] = '\\';
+								buf[buflen++] = 'n';
+							}
+						break;
+						default:
+							buf[buflen++] = tempbuf[index];
+						break;
+					}
+					if (last_was_backslash) {
+						last_was_backslash = 0;
+					} else if (tempbuf[index] == '\\') {
+						last_was_backslash = 1;
+					}
+				}
 				REPLACE_DEFINES(buf, 0, buflen)
 				def.str.str = buf;
 				def.str.len = buflen;
@@ -508,9 +552,58 @@ cmd_define: ;
 				ERR("Invalid preprocessor command: '%s'", buf)
 			}
 			printf("Zf?");
+		} else if (php_mode == 0) {
+			WRITE_CODE_C(CUR_CHAR);
+			if (php_chars == 0 && CUR_CHAR == '<') {
+				php_chars = 1;
+			} else if (php_chars == 1 && CUR_CHAR == '?') {
+				if (INI_BOOL("short_open_tag") == 1) {
+					php_mode = 1;
+				} else {
+					php_chars = 2;
+				}
+			} else if (php_chars == 2 && (CUR_CHAR == '=' || CUR_CHAR == 'p')) {
+				if (CUR_CHAR == '=') {
+					php_mode = 1;
+				} else {
+					php_chars = 3;
+				}
+			} else if (php_chars == 3 && CUR_CHAR == 'h') {
+				php_chars = 4;
+			} else if (php_chars == 4 && CUR_CHAR == 'p') {
+				php_mode = 1;
+			} else {
+				php_chars = 0;
+			}
 		} else {
 			WRITE_CODE_C(CUR_CHAR);
 			printf("%d (%c) ", CUR_CHAR, CUR_CHAR);
+			if (main_commentmode == 0 && main_stringmode == 0 && CUR_CHAR == '?' && NTH_CHAR(1) == '>') {
+				php_mode = 0;
+				php_chars = 0;
+			}
+			if (main_commentmode == 0 && NTH_CHAR(-1) != '\\' && CUR_CHAR == '"') {
+				if (main_stringmode == 0) {
+					main_stringmode = 1;
+				} else if (main_stringmode == 1) {
+					main_stringmode = 0;
+				}
+			}
+			if (main_commentmode == 0 && NTH_CHAR(-1) != '\\' && CUR_CHAR == '\'') {
+				if (main_stringmode == 0) {
+					main_stringmode = 2;
+				} else if (main_stringmode == 2) {
+					main_stringmode = 0;
+				}
+			}
+			if (main_stringmode == 0 && NTH_CHAR(-1) == '/' && CUR_CHAR == '*') {
+				main_commentmode = 1;
+			}/* else if (CUR_CHAR == '#' || (NTH_CHAR(-1) == '/' && CUR_CHAR == '//') {
+				commentmode = 2;
+			}*/
+			if (main_stringmode == 0 && CUR_CHAR == '*' && NTH_CHAR(1) == '/') {
+				main_commentmode = 0;
+			}
 		}
 		printf("Ci: %i\n", i);
 	} while (i + 1 < *len);
