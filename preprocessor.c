@@ -499,7 +499,8 @@ cmd_define: ;
 				codelen += diff - init_diff;
 				defoffset = codelen;
 				READ_UNTIL(CUR_CHAR == '\\' || NTH_CHAR(1) != '\n')
-				char* tempbuf = buf;
+				char *tempbuf = emalloc(buflen);
+				memcpy(tempbuf, buf, buflen);
 				int tempbuflen = buflen;
 				buflen = 0;
 				for (int index = 0; index < tempbuflen; index++) {
@@ -525,7 +526,8 @@ cmd_define: ;
 							if (stringmode == 0) {
 								buf[buflen++] = ' ';
 							} else {
-								buf[buflen-1] = '\\';
+								buf = erealloc(buf, tempbuflen + buflen - index + 1);
+								buf[buflen++] = '\\';
 								buf[buflen++] = 'n';
 							}
 						break;
