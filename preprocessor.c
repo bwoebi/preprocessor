@@ -541,6 +541,7 @@ cmd_define: ;
 						last_was_backslash = 1;
 					}
 				}
+				efree(tempbuf);
 				REPLACE_DEFINES(buf, 0, buflen)
 				def.str.str = buf;
 				def.str.len = buflen;
