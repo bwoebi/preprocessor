@@ -302,13 +302,13 @@ static inline char line_increment_check(const char c TSRMLS_DC) {
 								dfn *defn = &dfns[index];								\
 								if (defn->id.len == str_len && strncasecmp(bufloc, defn->id.str, str_len) == 0) {	\
 									if (defn->arg_count == 0) {							\
-										int templen = (int)(datalen - ir - off);				\
+										int templen = (int)(datalen - (ir - off));				\
 										char *temp = emalloc(templen);						\
 										memcpy(temp, bufloc + str_len, templen);				\
-										datalen += defn->str.len + str_len;					\
-										data = erealloc(data, datalen);						\
-										memcpy(data + ir - str_len, defn->str.str, defn->str.len);		\
-										i += defn->str.len - str_len;						\
+										datalen += defn->str.len - str_len;					\
+										ir += defn->str.len - str_len;						\
+										data = erealloc(data, datalen + off);					\
+										memcpy(bufloc, defn->str.str, defn->str.len);				\
 										memcpy(data + ir, temp, templen);					\
 										efree(temp);								\
 									}										\
@@ -367,7 +367,7 @@ static inline char line_increment_check(const char c TSRMLS_DC) {
 									break;										\
 									default:									\
 										if (maybe_defn && !stringmode && str_len == 0) {			\
-											bufloc = data + i;						\
+											bufloc = data + ir;						\
 											str_len = 1;							\
 										} else if (str_len > 0) {						\
 											str_len++;							\
@@ -418,7 +418,7 @@ static inline void preprocessor_patch_code(char **string, size_t *len TSRMLS_DC)
 	char php_mode = 0;
 	char php_chars = 0;
 	do {
-		if (php_mode && main_stringmode == 0 && main_commentmode == 0 && LINE_END_COND) {
+		if (LINE_END_COND && php_mode && main_stringmode == 0 && main_commentmode == 0) {
 			printf("Entered super? %i", i);
 			/* Instruction set: \define, \if, \else, \elif, \endif, \ifndef, \elifndef */
 
@@ -514,6 +514,7 @@ cmd_define: ;
 								stringmode = 0;
 							}
 							buf[buflen++] = '"';
+						break;
 						case '\'':
 							if (stringmode == 0) {
 								stringmode = 2;
@@ -613,6 +614,7 @@ cmd_define: ;
 
 	int diff = codelen - defoffset;
 	REPLACE_DEFINES(code, defoffset, diff);
+	codelen = diff + defoffset;
 
 	if (if_depth != -1) {
 		ERR("Preprocessor command 'endif' missing")
@@ -640,10 +642,10 @@ cmd_define: ;
 
 	*string = erealloc(*string, (codelen - (codelen % bufmax)) + bufmax);
 	memcpy(*string, code, codelen);
-	printf("%.*s", (int)codelen, code);
 	efree(code);
 	*len = codelen;
 
+	printf("%.*s", (int)*len, *string);
 	PHPPP_G(running) = 0;
 } /* }}} */
 
@@ -657,6 +659,8 @@ PHP_MINIT_FUNCTION(preprocessor)
 	/* If you have INI entries, uncomment these lines
 	REGISTER_INI_ENTRIES();
 	*/
+
+	ZEND_INIT_MODULE_GLOBALS(preprocessor, NULL, NULL);
 
 	PHPPP_G(running) = 0;
 
